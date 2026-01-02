@@ -85,17 +85,23 @@ def best_sheet_name(excel_file: pd.ExcelFile) -> str:
     return best_name
 
 
-def load_data(upload) -> pd.DataFrame:
+@st.cache_data(show_spinner="Loading data...")
+def load_excel(data: bytes, sheet_name: str | None) -> pd.DataFrame:
+    excel_file = pd.ExcelFile(io.BytesIO(data), engine="openpyxl")
+    resolved_name = sheet_name or best_sheet_name(excel_file)
+    return excel_file.parse(resolved_name)
+
+
+def load_data(upload, sheet_name: str | None, data: bytes | None) -> pd.DataFrame:
     if upload is None:
         return sample_data()
 
-    data = upload.read()
+    if data is None:
+        data = upload.read()
     if upload.name.endswith(".csv"):
         return pd.read_csv(io.BytesIO(data))
 
-    excel_file = pd.ExcelFile(io.BytesIO(data))
-    sheet_name = best_sheet_name(excel_file)
-    return excel_file.parse(sheet_name)
+    return load_excel(data, sheet_name)
 
 
 def sample_data() -> pd.DataFrame:
@@ -336,7 +342,28 @@ with st.sidebar:
     forecast_horizon = st.slider("Forecast Horizon (days)", min_value=5, max_value=60, value=20, step=5)
     conf_level = st.select_slider("Confidence Level", options=[0.9, 0.95, 0.99], value=0.95)
 
-raw_df = load_data(upload)
+sheet_options = None
+selected_sheet = None
+uploaded_bytes = None
+
+if upload is not None:
+    uploaded_bytes = upload.getvalue()
+    if upload.name.endswith((".xlsx", ".xls")):
+        try:
+            sheet_options = pd.ExcelFile(io.BytesIO(uploaded_bytes), engine="openpyxl").sheet_names
+        except Exception as exc:
+            st.error(f"Unable to read Excel sheets: {exc}")
+            sheet_options = []
+
+with st.sidebar:
+    if sheet_options:
+        selected_sheet = st.selectbox("Excel Sheet", ["Auto (best match)"] + sheet_options)
+
+raw_df = load_data(
+    upload,
+    None if selected_sheet in (None, "Auto (best match)") else selected_sheet,
+    uploaded_bytes,
+)
 
 if upload is None:
     st.info("Using sample data. Upload your dataset to analyze real prices.")
