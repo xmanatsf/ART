@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock Analysis Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>StockScope</h1>
+          <p>Interactive analytics suite</p>
+        </div>
+
+        <section class="panel">
+          <h2>Dataset</h2>
+          <p class="hint">Load <strong>stock_data.csv</strong> from the repo root.</p>
+          <button id="reload-data" class="primary">Reload dataset</button>
+          <div class="status" id="data-status">Waiting for data...</div>
+        </section>
+
+        <section class="panel">
+          <h2>Selections</h2>
+          <label>
+            Stock
+            <select id="stock-select"></select>
+          </label>
+          <label>
+            Benchmark
+            <select id="benchmark-select"></select>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="normalize-toggle" checked />
+            Normalize from first observation
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Z-Score Controls</h2>
+          <label>
+            Window
+            <input type="number" id="zscore-window" min="12" max="120" value="21" />
+          </label>
+          <label>
+            Window (years)
+            <input type="range" id="offset-years" min="1" max="7" value="3" />
+            <span class="range-value" id="offset-years-value">3</span>
+          </label>
+          <label>
+            Frequency
+            <select id="frequency-select">
+              <option value="Weekly">Weekly</option>
+              <option value="Daily">Daily</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Alpha Controls</h2>
+          <label>
+            Rolling Window (days)
+            <input type="number" id="alpha-window" min="5" max="300" value="21" />
+          </label>
+        </section>
+      </aside>
+
+      <main class="content">
+        <header class="hero">
+          <div>
+            <h2>Professional Stock Analysis Dashboard</h2>
+            <p>
+              Z-Score and rolling alpha analytics built on <span>stock_data.csv</span> with
+              intuitive controls and clean visual design.
+            </p>
+          </div>
+          <div class="hero-card">
+            <h3>Market Snapshot</h3>
+            <p id="latest-date">Latest date: —</p>
+          </div>
+        </header>
+
+        <section class="metrics">
+          <div class="metric-card">
+            <span>Latest Z-Score</span>
+            <strong id="metric-zscore">—</strong>
+          </div>
+          <div class="metric-card">
+            <span>Rolling Alpha</span>
+            <strong id="metric-alpha">—</strong>
+          </div>
+          <div class="metric-card">
+            <span>Cumulative Alpha</span>
+            <strong id="metric-cum-alpha">—</strong>
+          </div>
+        </section>
+
+        <section class="grid">
+          <div class="card">
+            <div class="card-header">
+              <h3>Z-Score Trend</h3>
+              <p>Rolling z-score with weekly/daily toggle.</p>
+            </div>
+            <div id="zscore-chart" class="chart"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <h3>Rolling Alpha vs Benchmark</h3>
+              <p>Rolling regression on returns.</p>
+            </div>
+            <div id="alpha-chart" class="chart"></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <h3>Cumulative Alpha</h3>
+            <p>Summed rolling alpha over the selected window.</p>
+          </div>
+          <div id="cum-alpha-chart" class="chart"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
