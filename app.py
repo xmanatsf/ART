@@ -23,18 +23,38 @@ def normal_cdf(value: float) -> float:
     return 0.5 * (1 + math.erf(value / math.sqrt(2)))
 
 
-def parse_date_column(df: pd.DataFrame) -> pd.DataFrame:
-    date_col = None
+def parse_date_series(series: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(series, errors="coerce")
+    parsed_ratio = parsed.notna().mean()
+
+    if parsed_ratio < 0.5:
+        formatted = pd.to_datetime(series.astype(str).str.strip(), format="%Y%m%d", errors="coerce")
+        if formatted.notna().mean() > parsed_ratio:
+            parsed = formatted
+
+    return parsed
+
+
+def detect_date_column(df: pd.DataFrame) -> str:
     for col in df.columns:
         if str(col).strip().lower() in {"date", "datetime", "timestamp"}:
-            date_col = col
-            break
-    if date_col is None:
-        date_col = df.columns[0]
+            return col
 
-    parsed = pd.to_datetime(df[date_col], errors="coerce")
-    if parsed.isna().all():
-        parsed = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
+    best_col = df.columns[0]
+    best_ratio = 0.0
+    for col in df.columns:
+        parsed = parse_date_series(df[col])
+        ratio = parsed.notna().mean()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_col = col
+
+    return best_col
+
+
+def parse_date_column(df: pd.DataFrame) -> pd.DataFrame:
+    date_col = detect_date_column(df)
+    parsed = parse_date_series(df[date_col])
 
     df = df.copy()
     df[date_col] = parsed
@@ -64,8 +84,12 @@ def sample_data() -> pd.DataFrame:
 
 def clean_numeric(df: pd.DataFrame) -> pd.DataFrame:
     numeric_df = df.copy()
+    numeric_df = numeric_df.replace(
+        {"#N/A": np.nan, "N/A": np.nan, "NA": np.nan, "null": np.nan, "-": np.nan, "": np.nan}
+    )
     for col in numeric_df.columns:
-        numeric_df[col] = pd.to_numeric(numeric_df[col], errors="coerce")
+        numeric_df[col] = pd.to_numeric(numeric_df[col].astype(str).str.replace(",", ""), errors="coerce")
+    numeric_df = numeric_df.dropna(axis=1, how="all")
     numeric_df = numeric_df.dropna(how="all")
     return numeric_df
 
