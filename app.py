@@ -305,15 +305,25 @@ zscore_series = calculate_moving_zscore(zscore_source["stock_price"], zscore_win
 zscore_chart = plot_zscore_chart(zscore_df, zscore_window, offset_years, frequency)
 
 returns_df = calculate_daily_returns(prices.reset_index(), stock, benchmark)
-alpha_df = calculate_alpha(returns_df, stock, benchmark, alpha_window)
+if len(returns_df) < alpha_window:
+    st.warning("Not enough data for rolling alpha. Reduce the window or upload more history.")
+    alpha_df = pd.DataFrame()
+else:
+    alpha_df = calculate_alpha(returns_df, stock, benchmark, alpha_window)
 
-alpha_series = alpha_df.set_index("date")["alpha"]
+alpha_series = alpha_df.set_index("date")["alpha"] if not alpha_df.empty else pd.Series(dtype=float)
 cumulative_alpha = alpha_series.cumsum()
 
 metric_cols = st.columns(3)
-metric_cols[0].metric("Latest Z-Score", f"{zscore_series.dropna().iloc[-1]:.2f}")
-metric_cols[1].metric("Rolling Alpha", f"{alpha_series.dropna().iloc[-1]:.5f}")
-metric_cols[2].metric("Cumulative Alpha", f"{cumulative_alpha.dropna().iloc[-1]:.5f}")
+latest_zscore = zscore_series.dropna()
+latest_alpha = alpha_series.dropna()
+latest_cum_alpha = cumulative_alpha.dropna()
+
+metric_cols[0].metric("Latest Z-Score", f"{latest_zscore.iloc[-1]:.2f}" if not latest_zscore.empty else "N/A")
+metric_cols[1].metric("Rolling Alpha", f"{latest_alpha.iloc[-1]:.5f}" if not latest_alpha.empty else "N/A")
+metric_cols[2].metric(
+    "Cumulative Alpha", f"{latest_cum_alpha.iloc[-1]:.5f}" if not latest_cum_alpha.empty else "N/A"
+)
 
 st.divider()
 
