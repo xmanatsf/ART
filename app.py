@@ -63,6 +63,28 @@ def parse_date_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def best_sheet_name(excel_file: pd.ExcelFile) -> str:
+    best_name = excel_file.sheet_names[0]
+    best_score = -1
+
+    for name in excel_file.sheet_names:
+        sheet_df = excel_file.parse(name)
+        if sheet_df.empty:
+            continue
+        date_col = detect_date_column(sheet_df)
+        parsed_dates = parse_date_series(sheet_df[date_col])
+        date_score = parsed_dates.notna().mean()
+        numeric_score = sheet_df.drop(columns=[date_col], errors="ignore").apply(
+            lambda col: pd.to_numeric(col, errors="coerce").notna().mean()
+        )
+        score = date_score + numeric_score.mean()
+        if score > best_score:
+            best_score = score
+            best_name = name
+
+    return best_name
+
+
 def load_data(upload) -> pd.DataFrame:
     if upload is None:
         return sample_data()
@@ -70,7 +92,10 @@ def load_data(upload) -> pd.DataFrame:
     data = upload.read()
     if upload.name.endswith(".csv"):
         return pd.read_csv(io.BytesIO(data))
-    return pd.read_excel(io.BytesIO(data))
+
+    excel_file = pd.ExcelFile(io.BytesIO(data))
+    sheet_name = best_sheet_name(excel_file)
+    return excel_file.parse(sheet_name)
 
 
 def sample_data() -> pd.DataFrame:
@@ -87,6 +112,7 @@ def clean_numeric(df: pd.DataFrame) -> pd.DataFrame:
     numeric_df = numeric_df.replace(
         {"#N/A": np.nan, "N/A": np.nan, "NA": np.nan, "null": np.nan, "-": np.nan, "": np.nan}
     )
+    numeric_df = numeric_df.drop(columns=[col for col in numeric_df.columns if str(col).startswith("Unnamed:")])
     for col in numeric_df.columns:
         numeric_df[col] = pd.to_numeric(numeric_df[col].astype(str).str.replace(",", ""), errors="coerce")
     numeric_df = numeric_df.dropna(axis=1, how="all")
