@@ -1,26 +1,11 @@
 import io
-import math
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import statsmodels.api as sm
 import streamlit as st
-
-
-@dataclass
-class TrendSignal:
-    direction: str
-    slope: float
-    annualized_return: float
-    r2: float
-    t_stat: float
-    p_value: float
-    window: int
-
-
-def normal_cdf(value: float) -> float:
-    return 0.5 * (1 + math.erf(value / math.sqrt(2)))
+from statsmodels.regression.rolling import RollingOLS
 
 
 def parse_date_series(series: pd.Series) -> pd.Series:
@@ -92,6 +77,15 @@ def load_excel(data: bytes, sheet_name: str | None) -> pd.DataFrame:
     return excel_file.parse(resolved_name)
 
 
+def sample_data() -> pd.DataFrame:
+    rng = np.random.default_rng(7)
+    dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=260, freq="B")
+    spy = 350 + np.cumsum(rng.normal(0.2, 1.0, size=len(dates)))
+    tsla = 200 + np.cumsum(rng.normal(0.4, 3.0, size=len(dates)))
+    avgo = 45 + np.cumsum(rng.normal(0.1, 0.8, size=len(dates)))
+    return pd.DataFrame({"date": dates, "SPY": spy, "AVGO": avgo, "TSLA": tsla})
+
+
 def load_data(upload, sheet_name: str | None, data: bytes | None) -> pd.DataFrame:
     if upload is None:
         return sample_data()
@@ -102,15 +96,6 @@ def load_data(upload, sheet_name: str | None, data: bytes | None) -> pd.DataFram
         return pd.read_csv(io.BytesIO(data))
 
     return load_excel(data, sheet_name)
-
-
-def sample_data() -> pd.DataFrame:
-    rng = np.random.default_rng(7)
-    dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=260, freq="B")
-    spy = 350 + np.cumsum(rng.normal(0.2, 1.0, size=len(dates)))
-    tsla = 200 + np.cumsum(rng.normal(0.4, 3.0, size=len(dates)))
-    avgo = 45 + np.cumsum(rng.normal(0.1, 0.8, size=len(dates)))
-    return pd.DataFrame({"date": dates, "SPY": spy, "AVGO": avgo, "TSLA": tsla})
 
 
 def clean_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -126,148 +111,99 @@ def clean_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return numeric_df
 
 
-def resample_prices(df: pd.DataFrame, frequency: str) -> pd.DataFrame:
+def normalize_prices(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    for col in normalized.columns:
+        first_valid = normalized[col].first_valid_index()
+        if first_valid is not None and normalized[col].loc[first_valid] != 0:
+            normalized[col] = normalized[col] / normalized[col].loc[first_valid]
+    return normalized
+
+
+@st.cache_data(show_spinner=True)
+def calculate_moving_zscore(series: pd.Series, window: int) -> pd.Series:
+    mean = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    return (series - mean) / std
+
+
+def resample_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    weekly_dates = (
+        df.reset_index()
+        .groupby(pd.Grouper(key=df.index.name, freq="W"))[df.index.name]
+        .max()
+        .tolist()
+    )
+    return df[df.index.isin(weekly_dates)]
+
+
+def plot_zscore_chart(df_stock: pd.DataFrame, window: int, offset_years: int, frequency: str) -> go.Figure:
+    df_local = df_stock.copy()
+
     if frequency == "Weekly":
-        return df.resample("W-FRI").last().dropna(how="all")
-    return df
+        df_local = resample_weekly(df_local)
 
+    df_local["z_score"] = calculate_moving_zscore(df_local["stock_price"], window)
 
-def compute_zscore(series: pd.Series) -> pd.Series:
-    return (series - series.mean()) / series.std(ddof=0)
+    end_date = df_local.index.max()
+    start_date = end_date - pd.DateOffset(months=offset_years * 12 - 1)
+    df_local = df_local[(df_local.index >= start_date) & (df_local.index <= end_date)]
 
-
-def rolling_alpha(stock: pd.Series, benchmark: pd.Series, window: int) -> pd.Series:
-    aligned = pd.concat([stock, benchmark], axis=1).dropna()
-    y = aligned.iloc[:, 0].values
-    x = aligned.iloc[:, 1].values
-    alphas = [np.nan] * (window - 1)
-
-    for idx in range(window - 1, len(aligned)):
-        xw = x[idx - window + 1 : idx + 1]
-        yw = y[idx - window + 1 : idx + 1]
-        x_mean = xw.mean()
-        y_mean = yw.mean()
-        denom = ((xw - x_mean) ** 2).sum()
-        if denom == 0:
-            alphas.append(np.nan)
-            continue
-        beta = ((xw - x_mean) * (yw - y_mean)).sum() / denom
-        intercept = y_mean - beta * x_mean
-        prediction = intercept + beta * xw[-1]
-        residual = yw[-1] - prediction
-        alphas.append(residual)
-
-    return pd.Series(alphas, index=aligned.index)
-
-
-def trend_signal(series: pd.Series, window: int) -> TrendSignal:
-    series = series.dropna()
-    if len(series) < window:
-        window = max(10, len(series))
-    recent = series.tail(window)
-    y = np.log(recent.values)
-    x = np.arange(len(recent))
-    slope, intercept = np.polyfit(x, y, 1)
-    pred = slope * x + intercept
-    residuals = y - pred
-    ss_res = (residuals**2).sum()
-    ss_tot = ((y - y.mean()) ** 2).sum()
-    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-
-    s_err = math.sqrt(ss_res / max(len(recent) - 2, 1))
-    ssx = ((x - x.mean()) ** 2).sum()
-    se_slope = s_err / math.sqrt(ssx) if ssx > 0 else float("nan")
-    t_stat = slope / se_slope if se_slope and not math.isnan(se_slope) else 0
-    p_value = 2 * (1 - normal_cdf(abs(t_stat)))
-
-    annualized = math.exp(slope * 252) - 1
-    direction = "Uptrend" if slope > 0 else "Downtrend"
-    return TrendSignal(
-        direction=direction,
-        slope=slope,
-        annualized_return=annualized,
-        r2=r2,
-        t_stat=t_stat,
-        p_value=p_value,
-        window=window,
-    )
-
-
-def future_index(index: pd.DatetimeIndex, horizon: int) -> pd.DatetimeIndex:
-    freq = pd.infer_freq(index) or "B"
-    start = index[-1]
-    return pd.date_range(start=start, periods=horizon + 1, freq=freq)[1:]
-
-
-def forecast_prices(series: pd.Series, window: int, horizon: int, conf_level: float) -> pd.DataFrame:
-    series = series.dropna()
-    window = min(len(series), window)
-    recent = series.tail(window)
-    y = np.log(recent.values)
-    x = np.arange(len(recent))
-    slope, intercept = np.polyfit(x, y, 1)
-    pred = slope * x + intercept
-    residuals = y - pred
-    s_err = math.sqrt((residuals**2).sum() / max(len(recent) - 2, 1))
-    ssx = ((x - x.mean()) ** 2).sum()
-
-    full_index = recent.index.append(future_index(recent.index, horizon))
-    x_future = np.arange(len(full_index))
-    pred_all = slope * x_future + intercept
-
-    z_lookup = {0.9: 1.645, 0.95: 1.96, 0.99: 2.576}
-    z_score = z_lookup.get(conf_level, 1.96)
-    se_pred = s_err * np.sqrt(
-        1 + 1 / len(recent) + ((x_future - x.mean()) ** 2) / ssx if ssx > 0 else 1
-    )
-    lower = np.exp(pred_all - z_score * se_pred)
-    upper = np.exp(pred_all + z_score * se_pred)
-
-    forecast_df = pd.DataFrame(
-        {
-            "forecast": np.exp(pred_all),
-            "lower": lower,
-            "upper": upper,
-        },
-        index=full_index,
-    )
-    return forecast_df
-
-
-def styled_layout():
-    st.markdown(
-        """
-        <style>
-        .metric-card {
-            background: #ffffff;
-            border-radius: 12px;
-            padding: 16px;
-            border: 1px solid #e6e6e6;
-            box-shadow: 0 6px 14px rgba(20, 20, 20, 0.05);
-        }
-        .metric-label {
-            font-size: 0.85rem;
-            color: #6b7280;
-            margin-bottom: 0.25rem;
-        }
-        .metric-value {
-            font-size: 1.35rem;
-            font-weight: 600;
-            color: #111827;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def chart_zscore(zscore: pd.Series) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=zscore.index, y=zscore, mode="lines", name="Z-Score"))
-    for level, color in [(0, "#4c566a"), (1, "#88c0d0"), (2, "#a3be8c"), (-1, "#d08770"), (-2, "#bf616a")]:
-        fig.add_hline(y=level, line_dash="dash", line_color=color, opacity=0.6)
-    fig.update_layout(template="plotly_white", height=320, margin=dict(l=20, r=20, t=30, b=20))
+    fig.add_trace(go.Scatter(x=df_local.index, y=df_local["z_score"], mode="lines", name="Z-Score"))
+
+    z_scores = [0, -2, 2, -4, 4]
+    colors = ["black", "blue", "blue", "red", "red"]
+    min_date, max_date = df_local.index.min(), df_local.index.max()
+
+    for z_val, color in zip(z_scores, colors):
+        fig.add_shape(
+            type="line",
+            line=dict(dash="dash", color=color),
+            x0=min_date,
+            x1=max_date,
+            y0=z_val,
+            y1=z_val,
+        )
+
+    fig.update_layout(
+        template="plotly_white",
+        title=f"Moving Z-Scores for Stock Price ({frequency})",
+        xaxis_title="Date",
+        yaxis_title="Z-Score",
+        height=420,
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
     return fig
+
+
+@st.cache_data(show_spinner=True)
+def calculate_daily_returns(df_stock: pd.DataFrame, symbol1: str, symbol2: str) -> pd.DataFrame:
+    df_local = df_stock.copy()
+    df_local[f"return_{symbol1}"] = df_local[symbol1].pct_change()
+    df_local[f"return_{symbol2}"] = df_local[symbol2].pct_change()
+    df_local.dropna(inplace=True)
+    return df_local
+
+
+def calculate_alpha(df_in: pd.DataFrame, symbol1: str, symbol2: str, window: int) -> pd.DataFrame:
+    df_sorted = df_in.sort_values("date", ascending=True)
+
+    if f"return_{symbol1}" not in df_sorted.columns or f"return_{symbol2}" not in df_sorted.columns:
+        raise ValueError("Return columns missing for alpha calculation.")
+
+    y = df_sorted[f"return_{symbol1}"]
+    x = sm.add_constant(df_sorted[f"return_{symbol2}"])
+    model = RollingOLS(y, x, window=window)
+    results = model.fit()
+
+    df_result = pd.DataFrame(
+        {
+            "date": df_sorted["date"][window - 1 :],
+            "alpha": results.params["const"],
+        }
+    )
+    return df_result.dropna()
 
 
 def chart_alpha(alpha: pd.Series) -> go.Figure:
@@ -285,50 +221,10 @@ def chart_cumulative_alpha(cum_alpha: pd.Series) -> go.Figure:
     return fig
 
 
-def chart_forecast(price: pd.Series, forecast: pd.DataFrame, horizon: int) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=price.index, y=price, mode="lines", name="Actual"))
-    fig.add_trace(
-        go.Scatter(
-            x=forecast.index,
-            y=forecast["forecast"],
-            mode="lines",
-            name="Trend Forecast",
-            line=dict(color="#2563eb"),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=forecast.index,
-            y=forecast["upper"],
-            mode="lines",
-            line=dict(width=0),
-            showlegend=False,
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=forecast.index,
-            y=forecast["lower"],
-            mode="lines",
-            fill="tonexty",
-            fillcolor="rgba(37, 99, 235, 0.15)",
-            line=dict(width=0),
-            name=f"{horizon}-step confidence",
-        )
-    )
-    fig.update_layout(template="plotly_white", height=360, margin=dict(l=20, r=20, t=30, b=20))
-    return fig
-
-
 st.set_page_config(page_title="Stock Analysis Dashboard", layout="wide")
-styled_layout()
 
 st.title("Professional Stock Analysis Dashboard")
-st.caption(
-    "Upload an Excel/CSV dataset to explore Z-Score, rolling alpha, and trend-based forecasts "
-    "grounded in historical significance."
-)
+st.caption("Upload an Excel/CSV dataset to explore Z-Score and rolling alpha insights.")
 
 with st.sidebar:
     st.header("Dataset")
@@ -336,11 +232,11 @@ with st.sidebar:
     st.caption("Expected format: first column is date, remaining columns are prices.")
 
     st.header("Analysis Controls")
-    frequency = st.radio("Z-Score Frequency", ["Daily", "Weekly"], horizontal=True)
-    alpha_window = st.slider("Regression Window (days)", min_value=20, max_value=200, value=60, step=5)
-    trend_window = st.slider("Trend Window (days)", min_value=30, max_value=250, value=120, step=10)
-    forecast_horizon = st.slider("Forecast Horizon (days)", min_value=5, max_value=60, value=20, step=5)
-    conf_level = st.select_slider("Confidence Level", options=[0.9, 0.95, 0.99], value=0.95)
+    zscore_window = st.number_input("Z-score window length", min_value=12, max_value=120, value=21)
+    offset_years = st.slider("Years for Z-score window", min_value=1, max_value=7, value=3, step=1)
+    frequency = st.selectbox("Z-score frequency", ["Weekly", "Daily"])
+    alpha_window = st.number_input("Alpha window (days)", min_value=5, max_value=300, value=21)
+    normalize_toggle = st.checkbox("Normalize prices from first observation", value=True)
 
 sheet_options = None
 selected_sheet = None
@@ -371,12 +267,16 @@ if upload is None:
 with st.expander("Preview dataset"):
     st.dataframe(raw_df.head(12), use_container_width=True)
 
+
 df = parse_date_column(raw_df)
 df = clean_numeric(df)
 
 if df.empty:
     st.error("No valid data found. Please upload a dataset with a date column and price columns.")
     st.stop()
+
+if normalize_toggle:
+    df = normalize_prices(df)
 
 price_columns = df.columns.tolist()
 if not price_columns:
@@ -393,73 +293,40 @@ with st.sidebar:
     stock = st.selectbox("Stock", available_stocks)
 
 prices = df[[stock, benchmark]].dropna()
+prices.index.name = "date"
 
 if prices.empty:
     st.error("Selected stock and benchmark do not have overlapping data.")
     st.stop()
 
-resampled = resample_prices(prices, frequency)
+zscore_df = pd.DataFrame({"stock_price": prices[stock]}, index=prices.index)
+zscore_source = resample_weekly(zscore_df) if frequency == "Weekly" else zscore_df
+zscore_series = calculate_moving_zscore(zscore_source["stock_price"], zscore_window)
+zscore_chart = plot_zscore_chart(zscore_df, zscore_window, offset_years, frequency)
 
-zscore = compute_zscore(resampled[stock])
-alpha = rolling_alpha(prices[stock], prices[benchmark], alpha_window)
-cumulative_alpha = alpha.cumsum()
+returns_df = calculate_daily_returns(prices.reset_index(), stock, benchmark)
+alpha_df = calculate_alpha(returns_df, stock, benchmark, alpha_window)
 
-trend = trend_signal(prices[stock], trend_window)
-forecast = forecast_prices(prices[stock], trend_window, forecast_horizon, conf_level)
+alpha_series = alpha_df.set_index("date")["alpha"]
+cumulative_alpha = alpha_series.cumsum()
 
-metric_cols = st.columns(5)
-metric_cols[0].markdown(
-    f"<div class='metric-card'><div class='metric-label'>Latest Z-Score</div><div class='metric-value'>{zscore.dropna().iloc[-1]:.2f}</div></div>",
-    unsafe_allow_html=True,
-)
-metric_cols[1].markdown(
-    f"<div class='metric-card'><div class='metric-label'>Rolling Alpha</div><div class='metric-value'>{alpha.dropna().iloc[-1]:.2f}</div></div>",
-    unsafe_allow_html=True,
-)
-metric_cols[2].markdown(
-    f"<div class='metric-card'><div class='metric-label'>Cumulative Alpha</div><div class='metric-value'>{cumulative_alpha.dropna().iloc[-1]:.2f}</div></div>",
-    unsafe_allow_html=True,
-)
-metric_cols[3].markdown(
-    f"<div class='metric-card'><div class='metric-label'>Trend Outlook</div><div class='metric-value'>{trend.direction}</div></div>",
-    unsafe_allow_html=True,
-)
-metric_cols[4].markdown(
-    f"<div class='metric-card'><div class='metric-label'>Annualized Trend</div><div class='metric-value'>{trend.annualized_return * 100:.1f}%</div></div>",
-    unsafe_allow_html=True,
-)
+metric_cols = st.columns(3)
+metric_cols[0].metric("Latest Z-Score", f"{zscore_series.dropna().iloc[-1]:.2f}")
+metric_cols[1].metric("Rolling Alpha", f"{alpha_series.dropna().iloc[-1]:.5f}")
+metric_cols[2].metric("Cumulative Alpha", f"{cumulative_alpha.dropna().iloc[-1]:.5f}")
 
 st.divider()
 
-summary_tab, alpha_tab, forecast_tab = st.tabs(["Z-Score", "Alpha", "Forecast"])
+left, right = st.columns(2)
+with left:
+    st.subheader("Z-Score Trend")
+    st.plotly_chart(zscore_chart, use_container_width=True)
 
-with summary_tab:
-    left, right = st.columns([2, 1])
-    with left:
-        st.subheader("Stock Z-Score")
-        st.plotly_chart(chart_zscore(zscore), use_container_width=True)
-
-    with right:
-        st.subheader("Trend Strength & Significance")
-        st.write(
-            f"Trend computed over the last **{trend.window}** sessions. "
-            f"R²: **{trend.r2:.2f}**, t-stat: **{trend.t_stat:.2f}**, "
-            f"p-value: **{trend.p_value:.3f}**."
-        )
-        st.caption("Lower p-value indicates higher statistical significance of the trend.")
-
-with alpha_tab:
+with right:
     st.subheader("Rolling Alpha vs Benchmark")
-    st.plotly_chart(chart_alpha(alpha), use_container_width=True)
+    st.plotly_chart(chart_alpha(alpha_series), use_container_width=True)
 
-    st.subheader("Cumulative Alpha")
-    st.plotly_chart(chart_cumulative_alpha(cumulative_alpha), use_container_width=True)
-
-with forecast_tab:
-    st.subheader("Trend Forecast with Confidence Band")
-    st.plotly_chart(chart_forecast(prices[stock], forecast, forecast_horizon), use_container_width=True)
-    st.caption(
-        "Forecast is based on a log-linear trend in the selected window. It is not a guarantee of future performance."
-    )
+st.subheader("Cumulative Alpha")
+st.plotly_chart(chart_cumulative_alpha(cumulative_alpha), use_container_width=True)
 
 st.caption("All analytics are derived from historical prices and should be used for informational purposes only.")
